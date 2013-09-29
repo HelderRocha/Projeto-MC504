@@ -1,0 +1,432 @@
+/****Uma releitura do problema de oxigênios e hidrogênios, utilizando uma interpretação
+ entre alunos, tutores e grupos formados por dois alunos e um tutor****/
+
+ /*Feito por Hélder Lima da Rocha e Lucas Mageste de Almeida, graduandos em Engenharia Elétrica pela UNICAMP*/
+
+/*Para o bom funcionamento do programa e necessario ter a biblioteca curses.h*/
+
+#include <stdio.h>
+#include <time.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <semaphore.h>
+#include <pthread.h>
+#include <curses.h>
+#include <string.h>
+#include <stdbool.h>
+
+#define SLEEP 2 /*é definido uma variável de sleep máximo que uma thread pode ter*/
+#define C 10 /*C se define como o espaçamento entre cada thread verticalmente quando impressas*/
+#define BORDA_UP 3 /*se refere ao espaço dado entre a borda superior da janela para começar a imprimir as threads*/
+#define ESPACO 9 /*se refere ao espaço entre duas filas de alunos (hidrogenios)*/
+#define ADD 12 /*se refere ao epaço entre a segunda fila de alunos (hidrogenio) e a fila de tutores (oxigenio) */
+#define INIT 7 /*é definido uma borda esquerda para começar a impressão do programa*/
+#define ESPERANDO 1 /*o estado 'ESPERANDO' é definido como valor 1*/
+#define ESPERA_BARREIRA 2 /*o estado 'ESPERA_BARREIRA' é definido como valor 1*/
+#define COMEMORA 3 /*o estado 'COMEMORA' é definido como valor 1*/
+#define RESTART 0 /*o estado 'RESTART' é definido como valor 1*/
+#define MAX 8 /*MAX e o valor maximo que N pode assumir*/
+
+sem_t mutex; /*semáforo mutex será usado para deixar apenas uma thread (aluno ou tutor) executar a região crítica*/
+sem_t hidro; /*usada para indicar quanto hidrogenios estão disponíveis para formarem grupos*/
+sem_t hidro_na_barreira; /*indica quantos hidrogenios já estão na barreira, com um máximo de 2*/
+sem_t oxi; /*usada para indicar quanto oxigenios estão disponíveis para formarem grupos*/
+sem_t oxi_na_barreira; /*indica quantos oxigenio já estão na barreira, com o máximo de 1*/
+sem_t auxiliarSync; /*usada para deixar apenas uma thread acessar uma região crítica que contém variáveis globais
+ que podem ser usadas/modificadas por uma ou mais threads*/
+sem_t aux; /*usada pra imprimir uma 'tela' apenas uma vez enquanto ela não é impressa*/
+pthread_barrier_t barreira; /*barreira que só deixa passar dois hidrogenios e um oxigenio*/
+
+/*declarada a variável de número máximo de grupos padrão como 6, mas que pode ser mudado pelo usuário*/
+int N=6;
+/*variaveis que armazenam o numero corrente de threads oxigenio e hidrogenio esperando por sua vez*/
+int oxygen=0, hydrogen=0;
+/*armazenam o tamanho maximo de colunas e filas*/
+int row, col;
+/*variáveis para dizer os estados de cada thread, os lugares ocupadas por cada thread na tela*/
+int estado_oxi[MAX], estado_hidro[2*MAX], place_oxi[MAX], place_hidro[2*MAX];
+/*utilizada para auxiliar em deixar a thread impressora ser executar uma única vez a cada impressão*/
+int condicao=1;
+/*Variavel que indica se a legenda deve aparecer ou nao*/
+_Bool flag_explicacao = false;
+
+
+void* impressora();/*função da thread que deve imprimir os resultados*/
+void* queuehidro(void* id); /*função utilizada pelas threads alunos (hidrogenio)*/
+void* queueoxi(void* id); /*função utilizada pelas threads alunos (hidrogenio)*/
+void* syncron (); /*função utilizada pela thread sincronizadora*/
+
+int main(int argc, char *argv[]) {
+
+    char lixo, c;
+
+    if(argc>1){ /*Caso apenas execute o programa, o valor de N será 6,
+        se forem dados os argumentos corretos este valor pode variar de 1 até 8*/
+        if(strcmp(argv[1], "-setN")==0 && argc==3){
+            N=atoi(argv[2]);
+            if(N<=0 || N>=9){
+                printf("\n\nInsira um numero de grupos possíveis entre 1 e 8\n\n");
+                return 0;
+            }
+        }
+        else{
+            printf("\n\nError: Uso incorreto - o primeiro argumento deve ser -setN e o segundo argumento um inteiro entre 1 e 8\n\n");
+            return 0;
+        }
+    }
+
+
+    printf("\n\nMaximize a Janela do Terminal Para uma Melhor Animação\n\t\tSugerido: 165x40\n\n");
+    printf("\tPressione Enter Para Iniciar\n\n");
+    scanf("%c", &lixo);
+
+    int i;
+    /*são declaradas as threads que serão os tutores, alunos, a impressora e uma thread responsável por sincronização*/
+    pthread_t thr_hidro[2*MAX], thr_oxi[MAX], printer, sincronizadora;;
+
+    /*é iniciada a tela onde as thrads serão impressas*/
+    initscr();
+    /*col e row obtem os valores da janela*/
+    getmaxyx(stdscr,row,col);
+
+    /*são setadas as posições ocupadas pelas threads todas como -1, já que inicialmente nenhuma thread as ocupa*/
+    memset(place_oxi, -1, sizeof(place_oxi));
+    memset(place_hidro, -1, sizeof(place_hidro));
+
+    /*são iniciados os semáforos usados no programa*/
+    sem_init(&aux, 0, 0);
+    sem_init(&mutex, 0, 1);
+    sem_init(&oxi, 0, 0);
+    sem_init(&oxi_na_barreira, 0, 1);
+    sem_init(&hidro, 0, 0);
+    sem_init(&hidro_na_barreira, 0, 2);
+    sem_init(&auxiliarSync, 0, 1);
+    pthread_barrier_init(&barreira, NULL, 3);
+
+    for (i = 0; i < N; i++) {
+        /*são criadas as threads de tutores e alunos usadas no programa*/
+        pthread_create(&thr_oxi[i], NULL, queueoxi, (void*) i);
+        pthread_create(&thr_hidro[i], NULL, queuehidro, (void*) i);
+        pthread_create(&thr_hidro[N+i], NULL, queuehidro, (void*) N+i);
+    }
+    /*são criadas a thread que irá imprimir e a thread que irá sincronizar as outras threads*/
+    pthread_create(&sincronizadora, NULL, syncron, NULL);
+    pthread_create(&printer, NULL, impressora, NULL);
+
+    /*é esperado um input do usuário para acabar a execução do programa, ou, caso for 'h', mostrar uma legenda*/
+    do{
+        scanf("%c", &c);
+        flag_explicacao=!flag_explicacao;
+    }while(c=='i');
+    /*destrói a janela*/
+	endwin();
+
+    return 0;
+}
+
+void* impressora(){/*função da thread que deve imprimir os resultados*/
+
+    /*a variável comemora assume valores alternados de 0 e 1 a cada execução, e existe uma variável i, que é um counter*/
+	int i;
+	_Bool comemora = false;
+
+	while(1){
+	    	/*espera sua vez para entrar na região crítica*/
+		sem_wait(&auxiliarSync);		
+		
+		/*é impressa uma mensagem indicando onde obter informacoes*/
+		if(!flag_explicacao){
+		mvprintw(BORDA_UP+ESPACO+ADD-3, col/2-23, "Pressione a tecla 'I' Para Ativar Informacoes");
+		} 
+
+		/*Se o usuario ativar a flag explicacao uma legenda da figura ira aparecer na tela*/
+		else if(flag_explicacao){
+		mvprintw(BORDA_UP-1, col/2+10, "Pressione Enter Para Sair");
+		mvprintw(BORDA_UP+1, col/2+10, "Cada Grupo e Formado Por Dois Alunos e Um Tutor");
+		mvprintw(BORDA_UP+3, col/2+10, "Apenas Um Grupo e Formado Por Vez");		
+		mvprintw(BORDA_UP+5, col/2+10, "Meninas e Meninos Representam Alunos Equivalentes");
+		mvprintw(BORDA_UP+7, col/2+10, "Enquanto Dormem Estao Esperando Condicoes");
+		mvprintw(BORDA_UP+8, col/2+10, "Para Formar Um Grupo");
+		mvprintw(BORDA_UP+10, col/2+10, "Uma Mao Levantada Significa Que o Grupo");
+		mvprintw(BORDA_UP+11, col/2+10, "Foi Definido Mas Ainda Nao Esta Junto");
+		mvprintw(BORDA_UP+13, col/2+10, "Quando o Grupo e Reunido os Elementos Comemoram e Somem");
+		mvprintw(BORDA_UP+15, col/2+10, "Pressione a tecla 'I' Para Desativar Informacoes");
+		}
+			
+
+        	/*imprime as threads oxigênio (tutores)*/
+		for(i=0; i<N; i++){
+			if(place_oxi[i]!=-1){ /*caso o local esteja com alguma thread, ela é impressa*/
+				if(estado_oxi[place_oxi[i]]==ESPERANDO){ /*imprime se a thread está esperando*/
+					mvprintw(BORDA_UP+ESPACO+ADD-1, INIT+C*i,  "     zzz");
+					mvprintw(BORDA_UP+ESPACO+ADD, INIT+C*i,  "    O   ");
+                    			mvprintw(BORDA_UP+ESPACO+ADD+1, INIT+C*i, " /[* *]\\");
+                    			mvprintw(BORDA_UP+ESPACO+ADD+2, INIT+C*i, " \\ [H] /");
+                    			mvprintw(BORDA_UP+ESPACO+ADD+3, INIT+C*i, "   [H]  ");
+                    			mvprintw(BORDA_UP+ESPACO+ADD+4, INIT+C*i, "   4 4  ");
+                    			mvprintw(BORDA_UP+ESPACO+ADD+5, INIT+C*i, "   | |  ");
+                    			mvprintw(BORDA_UP+ESPACO+ADD+6, INIT+C*i, "   ´ `  ");
+				}
+				else if(estado_oxi[place_oxi[i]]==ESPERA_BARREIRA){ /*imprime se a thread está esperando na barreira*/
+					mvprintw(BORDA_UP+ESPACO+ADD, INIT+C*i,  "\\   O   ");
+                   			 mvprintw(BORDA_UP+ESPACO+ADD+1, INIT+C*i, " `[* *]\\");
+                   			 mvprintw(BORDA_UP+ESPACO+ADD+2, INIT+C*i, "   [H] /");
+                   			 mvprintw(BORDA_UP+ESPACO+ADD+3, INIT+C*i, "   [H]  ");
+                   			 mvprintw(BORDA_UP+ESPACO+ADD+4, INIT+C*i, "   4 4  ");
+                    			mvprintw(BORDA_UP+ESPACO+ADD+5, INIT+C*i, "   | |  ");
+                    			mvprintw(BORDA_UP+ESPACO+ADD+6, INIT+C*i, "   ´ `  ");
+				}
+				else if(estado_oxi[place_oxi[i]]==COMEMORA){ /*imprime se a thread está comemorando pois achou um grupo*/
+					if(comemora==1){ /*há duas animações de comemora que ficam se intercalando, para dar sensação de movimento*/
+						mvprintw(BORDA_UP+ESPACO+ADD, INIT+C*i,  "\\   O   /");
+                        			mvprintw(BORDA_UP+ESPACO+ADD+1, INIT+C*i, " `[* *]´");
+                        			mvprintw(BORDA_UP+ESPACO+ADD+2, INIT+C*i, "   [H] ");
+                       				 mvprintw(BORDA_UP+ESPACO+ADD+3, INIT+C*i, "   [H]  ");
+                       				 mvprintw(BORDA_UP+ESPACO+ADD+4, INIT+C*i, "   4 4  ");
+                        			mvprintw(BORDA_UP+ESPACO+ADD+5, INIT+C*i, "   | |  ");
+                        			mvprintw(BORDA_UP+ESPACO+ADD+6, INIT+C*i, "   ´ `  ");
+					}
+					else{
+						mvprintw(BORDA_UP+ESPACO+ADD, INIT+C*i,  "    O   ");
+                        			mvprintw(BORDA_UP+ESPACO+ADD+1, INIT+C*i, " /[* *]\\");
+                        			mvprintw(BORDA_UP+ESPACO+ADD+2, INIT+C*i, " \\ [H] /");
+                        			mvprintw(BORDA_UP+ESPACO+ADD+3, INIT+C*i, "   [H]  ");
+                        			mvprintw(BORDA_UP+ESPACO+ADD+4, INIT+C*i, "   4 4  ");
+                       				mvprintw(BORDA_UP+ESPACO+ADD+5, INIT+C*i, "   | |  ");
+                        			mvprintw(BORDA_UP+ESPACO+ADD+6, INIT+C*i, "   ´ `  ");
+
+					}
+				}
+			}
+		}
+
+		for(i=0; i<2*N; i++){ /*são impressas as threads hidrogênio (alunos)*/
+			if(place_hidro[i]!=-1){ /*caso o local esteja com alguma thread, ela é impressa*/
+				if(place_hidro[i]%2==0){ /*se o id da thread for par, athread é considerada mulher*/
+					if(estado_hidro[place_hidro[i]]==ESPERANDO){ /*imprime se a thread está esperando*/
+						mvprintw(BORDA_UP + (i/N)*ESPACO-1, INIT+C*(i%N), "    zzz");
+						mvprintw(BORDA_UP + (i/N)*ESPACO, INIT+C*(i%N), " ´()` ");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+1, INIT+C*(i%N), " /oo\\");
+                       				mvprintw(BORDA_UP + (i/N)*ESPACO+2, INIT+C*(i%N), " \\)(/");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+3, INIT+C*(i%N), "  || ");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+4, INIT+C*(i%N), "  || ");
+                       				mvprintw(BORDA_UP + (i/N)*ESPACO+5, INIT+C*(i%N), "  ´` ");
+					}
+					else if(estado_hidro[place_hidro[i]]==ESPERA_BARREIRA){ /*imprime se a thread está esperando na barreira*/
+						mvprintw(BORDA_UP + (i/N)*ESPACO, INIT+C*(i%N), "\\´()` ");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+1, INIT+C*(i%N), " `oo\\");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+2, INIT+C*(i%N), "  )(/");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+3, INIT+C*(i%N), "  || ");
+                       				mvprintw(BORDA_UP + (i/N)*ESPACO+4, INIT+C*(i%N), "  || ");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+5, INIT+C*(i%N), "  ´` ");
+					}
+					else if(estado_hidro[place_hidro[i]]==COMEMORA){ /*imprime se a thread está comemorando pois achou um grupo*/
+						if(comemora==1){ /*há duas animações de comemora que ficam se intercalando, para dar sensação de movimento*/
+							mvprintw(BORDA_UP + (i/N)*ESPACO, INIT+C*(i%N), "\\´()`/");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+1, INIT+C*(i%N), " `oo´ ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+2, INIT+C*(i%N), "  )( ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+3, INIT+C*(i%N), "  || ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+4, INIT+C*(i%N), "  || ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+5, INIT+C*(i%N), "  ´` ");
+						}
+						else{
+							mvprintw(BORDA_UP + (i/N)*ESPACO, INIT+C*(i%N), " ´()` ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+1, INIT+C*(i%N), " /oo\\ ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+2, INIT+C*(i%N), " \\)(/ ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+3, INIT+C*(i%N), "  || ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+4, INIT+C*(i%N), "  || ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+5, INIT+C*(i%N), "  ´` ");
+						}
+					}
+				}
+				else{ /*se o ID é ímpar, a thread é menino e as outras funções são análogas*/
+					if(estado_hidro[place_hidro[i]]==ESPERANDO){
+						mvprintw(BORDA_UP + (i/N)*ESPACO-1, INIT+C*(i%N), "    zzz");
+						mvprintw(BORDA_UP + (i/N)*ESPACO, INIT+C*(i%N), "  () __");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+1, INIT+C*(i%N), " /[]\\||");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+2, INIT+C*(i%N), " \\[] ||");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+3, INIT+C*(i%N), "  || --");
+                       				mvprintw(BORDA_UP + (i/N)*ESPACO+4, INIT+C*(i%N), "  || ");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+5, INIT+C*(i%N), "  ´` ");
+					}
+					else if(estado_hidro[place_hidro[i]]==ESPERA_BARREIRA){
+						mvprintw(BORDA_UP + (i/N)*ESPACO, INIT+C*(i%N), "\\ () __");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+1, INIT+C*(i%N), " `[]\\||");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+2, INIT+C*(i%N), "  [] ||");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+3, INIT+C*(i%N), "  || --");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+4, INIT+C*(i%N), "  || ");
+                        			mvprintw(BORDA_UP + (i/N)*ESPACO+5, INIT+C*(i%N), "  ´` ");
+					}
+					else if(estado_hidro[place_hidro[i]]==COMEMORA){
+						if(comemora==1){
+							mvprintw(BORDA_UP + (i/N)*ESPACO-2, INIT+C*(i%N), " ____");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO-1, INIT+C*(i%N), "(____)");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO, INIT+C*(i%N), " |()|  ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+1, INIT+C*(i%N), " `[]´  ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+2, INIT+C*(i%N), "  []   ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+3, INIT+C*(i%N), "  ||   ");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+4, INIT+C*(i%N), "  ||");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+5, INIT+C*(i%N), "  ´`");
+						}
+						else{
+							mvprintw(BORDA_UP + (i/N)*ESPACO, INIT+C*(i%N), "  () __");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+1, INIT+C*(i%N), " /[]\\||");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+2, INIT+C*(i%N), " \\[] ||");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+3, INIT+C*(i%N), "  || --");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+4, INIT+C*(i%N), "  ||");
+                            				mvprintw(BORDA_UP + (i/N)*ESPACO+5, INIT+C*(i%N), "  ´`");
+						}
+					}
+				}
+			}
+		}
+		/*comemora assume o true e false intercaladamente*/
+		comemora=!comemora;
+		condicao=0;
+		/*dá de volta a região crítica*/
+		sem_post(&auxiliarSync);
+		/*espera a thread sincronizadora dar post em aux para executar novamente*/
+		sem_wait(&aux);
+		condicao=1;
+	}
+
+
+}
+
+/*oxygen code*/
+
+void* queueoxi(void* id) { /*função utilizada pelas threads tutores (oxigenio)*/
+    /*memoriza o valor do lugar ocupado para depois desocupar a posição*/
+    int indice_oxi = (rand())%N;
+
+    while(1){
+        sleep(rand()%SLEEP+1);/*dorme por de 3 a 1 segundo*/
+        sem_wait(&mutex);/*espera por sua vez na região crítica entre tutores e alunos*/
+        sem_wait(&auxiliarSync);/*espera por sua vez para alterar o valor de place_hidro, que é utilizada pela thread impressora*/
+        estado_oxi[(int) id] = ESPERANDO;/*atualiza o estado da thread*/
+        while(place_oxi[indice_oxi]!=-1){/*procura um lugar vago*/
+            indice_oxi=(rand())%N;
+        }
+        place_oxi[indice_oxi]=(int) id;/*o local onde a thread fica é atualizado*/
+        sem_post(&auxiliarSync);/*libera a região crítica*/
+        sleep(rand()%SLEEP+1);/*dorme por de 3 a 1 segundo*/
+        oxygen ++;/*número de oxigenios é incrementado*/
+        if (hydrogen >= 2 && oxygen >= 1){ /*se já há um número de hidrogenios e oxigenio suficiente, entra no if*/
+            sem_wait(&auxiliarSync);/*espera por sua vez na região crítica*/
+            sem_post(&hidro); /*aumenta dois hidrogênios no semáforo que conta quantos estão prontos para virarem grupos*/
+            sem_post(&hidro);
+            hydrogen -= 2;/*tira dois hidrogenios que estão esperando por sua vez*/
+            sem_post(&oxi);/*aumenta um oxigênio no semáforo que conta quantos estão prontos para virarem grupos*/
+            oxygen -= 1;/*tira um oxigênio que está esperando por sua vez*/
+            sem_post(&auxiliarSync); /*libera a região crítica*/
+        }
+        else{ /*se não há um numero suficiente de hidrogenio e oxigenio ele libera a região critica entre tutores e alunos*/
+            sem_post(&mutex);
+        }
+        /*decerementa o número de oxigenios que estão esperando por um grupo, se possivel*/
+        sem_wait(&oxi);
+        /*indica que já está pronto pra entrar na barreira, se possível*/
+        sem_wait(&oxi_na_barreira);
+        /*mutex é liberado, ou seja, a região crítica entre tutores e alunos é liberada*/
+        sem_post(&mutex);
+        /*o estado de hidro é atualizado como ESPERA_BARREIRA*/
+        estado_oxi[(int) id] = ESPERA_BARREIRA;
+        /*dorme por de 3 a 1 segundo*/
+        sleep(rand()%SLEEP+1);
+        /*a thread espera na barreira por 3 para passar*/
+        pthread_barrier_wait(&barreira);
+        /*seu estado é atualizado para COMEMORA*/
+        estado_oxi[(int) id] = COMEMORA;
+        /*dorme por 2 segundos para comemorar*/
+        sleep(2);
+        /*seu estado é definido como RESTART, ou seja, está 'morta'*/
+        estado_oxi[(int) id] = RESTART;
+        /*o lugar ocupado pela thread é liberado*/
+        place_oxi[indice_oxi]=-1;
+        /*libera outro oxigenio para entrar na barreira*/
+        sem_post(&oxi_na_barreira);
+    }
+}
+
+/*hydrogen code*/
+
+void* queuehidro(void* id) { /*função utilizada pelas threads alunos (hidrogenio)*/
+
+    /*memoriza o valor do lugar ocupado para depois desocupar a posição*/
+    int indice_hidro = (rand())%(2*N);
+
+    while(1){
+        /*dorme por de 3 a 1 segundo*/
+        sleep(rand()%SLEEP+1);
+
+        /*espera por sua vez na região crítica entre tutores e alunos*/
+        sem_wait(&mutex);
+
+        sem_wait(&auxiliarSync);/*espera por sua vez para alterar o valor de place_hidro, que é utilizada pela thread impressora*/
+        estado_hidro[(int) id] = ESPERANDO;/*atualiza o estado da thread*/
+        while(place_hidro[indice_hidro]!=-1){ /*procura um lugar vago*/
+            indice_hidro=(rand())%(2*N);
+        }
+        place_hidro[indice_hidro]=(int) id; /*o local onde a thread fica é atualizado*/
+        sem_post(&auxiliarSync); /*libera a região crítica*/
+        sleep(rand()%SLEEP+1); /*dorme de 3 a 1 segundo*/
+        hydrogen ++; /*número de hidrogenios é incrementado*/
+        if (hydrogen >= 2 && oxygen >= 1){ /*se já há um número de hidrogenios e oxigenio suficiente, entra no if*/
+            sem_wait(&auxiliarSync);/*espera por sua vez na região crítica*/
+            sem_post(&hidro); /*aumenta dois hidrogênios no semáforo que conta quantos estão prontos para virarem grupos*/
+            sem_post(&hidro);
+            hydrogen -= 2;/*tira dois hidrogenios que estão esperando por sua vez*/
+            sem_post(&oxi);/*aumenta um oxigênio no semáforo que conta quantos estão prontos para virarem grupos*/
+            oxygen -= 1;/*tira um oxigênio que está esperando por sua vez*/
+            sem_post(&auxiliarSync); /*libera a região crítica*/
+        }
+        else{ /*se não há um numero suficiente de hidrogenio e oxigenio ele libera a região critica entre tutores e alunos*/
+            sem_post(&mutex);
+        }
+        /*decerementa o número de hidrogenios qu estão esperando por um grupo, se possivel*/
+        sem_wait(&hidro);
+        /*indica que já está pronto pra entrar na barreira, se possível*/
+        sem_wait(&hidro_na_barreira);
+        /*o estado de hidro é atualizado como ESPERA_BARREIRA*/
+        estado_hidro[(int) id] = ESPERA_BARREIRA;
+        /*a thread dorme de 1 a 3 segundos*/
+        sleep(rand()%SLEEP+1);
+        /*a thread espera na barreira por 3 para passar*/
+        pthread_barrier_wait(&barreira);
+        /*seu estado é atualizado para COMEMORA*/
+        estado_hidro[(int) id] = COMEMORA;
+        /*dorme por 2 segundos para comemorar*/
+        sleep(2);
+        /*seu estado é definido como RESTART, ou seja, está 'morta'*/
+        estado_hidro[(int) id] = RESTART;
+        /*o lugar ocupado pela thread é liberado*/
+        place_hidro[indice_hidro]=-1;
+        /*libera outro hidrogenio para entrar na barreira*/
+        sem_post(&hidro_na_barreira);
+        /*volta ao início da execução*/
+    }
+}
+
+
+void* syncron (){ /*função utilizada pela thread sincronizadora*/
+
+    /*é definido o tempo da sincronizadora como 0.3 segundo*/
+    struct timespec tim, tim2;
+    tim.tv_sec = 0;
+    tim.tv_nsec = 300000000;
+
+    /*a tela é apagada por precaução*/
+    erase();
+
+    while(1){
+    	nanosleep(&tim, &tim2); /*é esperado 0.3 segundo*/
+        sem_wait(&auxiliarSync); /*é esperado sua vez na região crítica*/
+        if(condicao==0) /*necessário para não dar post múltiplas vezes e deixar a thread impressora
+                            imprimir mais de uma vez durante alguma iteração*/
+            sem_post(&aux);/*deixa a thread impressora executar novamente*/
+        refresh();/*a tela é atualizada*/
+        erase();/*o back buffer é apagado*/
+        sem_post(&auxiliarSync);/*libera a região crítica*/
+    }
+
+}
